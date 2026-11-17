@@ -10,10 +10,9 @@
 #     Moteur compilé depuis les sources ou installé ailleurs : variable de dépôt UE_ROOT.
 #   - Visual Studio avec « Développement Desktop en C++ » : nécessaire pour un projet C++,
 #     et pour un projet Blueprint qui active des plugins hors défaut.
-#   - Git for Windows (Git LFS inclus) installé pour TOUS les utilisateurs, dans Program Files :
-#     le compte de service du runner ne peut pas lire une installation faite dans un profil.
-#     Le runner fige le PATH à sa configuration (fichier .path) : après une installation,
-#     lancer env.cmd dans le dossier du runner puis redémarrer son service.
+#   - Projet C++ : Unreal Editor fermé (ou Live Coding désactivé) sur cette machine pendant le
+#     build. Live Coding bloque toute compilation sur la même installation du moteur.
+#   Git n'a pas à être installé : sans Git utilisable, une version portable est téléchargée.
 #
 # Variables de dépôt facultatives (Settings → Secrets and variables → Actions → Variables) :
 #   - UE_ROOT  : dossier du moteur, ex. D:\Epic\UE_5.6
@@ -52,6 +51,37 @@ jobs:
       UPROJECT_OVERRIDE: ${{ vars.UPROJECT }}
 
     steps:
+      # Le runner tourne souvent sous un compte de service qui ne voit pas le Git de l'utilisateur
+      # (installé dans son profil). Sans Git + LFS utilisable, Git for Windows portable est
+      # téléchargé une fois dans le cache d'outils du runner : ni installation ni droits admin.
+      - name: Préparer Git
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ok = $false
+          try {
+            git --version | Out-Null
+            if ($LASTEXITCODE -eq 0) { git lfs version | Out-Null; $ok = ($LASTEXITCODE -eq 0) }
+          } catch { }
+          if ($ok) { Write-Host "Git présent : $((Get-Command git).Source)"; exit 0 }
+
+          $root = Join-Path $env:RUNNER_TOOL_CACHE 'PortableGit'
+          if (-not (Test-Path (Join-Path $root 'cmd\git.exe'))) {
+            $ProgressPreference = 'SilentlyContinue'
+            [Net.ServicePointManager]::SecurityProtocol = 'Tls12'
+            $release = Invoke-RestMethod -UseBasicParsing -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } `
+              -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest'
+            $asset = $release.assets | Where-Object { $_.name -match '^PortableGit-.*-64-bit\.7z\.exe$' } | Select-Object -First 1
+            $sfx = Join-Path $env:RUNNER_TEMP $asset.name
+            Write-Host "Téléchargement de $($asset.name)"
+            Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $sfx
+            Start-Process -FilePath $sfx -ArgumentList '-y', "-o`"$root`"" -Wait -NoNewWindow
+            Remove-Item $sfx
+          }
+          Join-Path $root 'cmd' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "Git portable : $root"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -107,6 +137,15 @@ jobs:
           "IS_CODE_PROJECT=$isCode" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Projet : $($uproject.FullName) (C++ : $isCode)"
           Write-Host "Moteur : $ueRoot"
+
+      - name: Vérifier que Live Coding est inactif
+        if: env.IS_CODE_PROJECT == 'True'
+        shell: powershell
+        run: |
+          if (Get-Process -Name LiveCodingConsole -ErrorAction SilentlyContinue) {
+            Write-Error "Live Coding est actif sur cette machine : Unreal refuse alors de compiler. Fermer Unreal Editor (ou Ctrl+Alt+F11 dans l'éditeur) puis relancer le build."
+            exit 1
+          }
 
       - name: Build, cook, package
         shell: powershell
