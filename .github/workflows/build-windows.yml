@@ -10,7 +10,10 @@
 #     Moteur compilé depuis les sources ou installé ailleurs : variable de dépôt UE_ROOT.
 #   - Visual Studio avec « Développement Desktop en C++ » : nécessaire pour un projet C++,
 #     et pour un projet Blueprint qui active des plugins hors défaut.
-#   - Git for Windows (Git LFS inclus).
+#   - Git for Windows (Git LFS inclus) installé pour TOUS les utilisateurs, dans Program Files :
+#     le compte de service du runner ne peut pas lire une installation faite dans un profil.
+#     Le runner fige le PATH à sa configuration (fichier .path) : après une installation,
+#     lancer env.cmd dans le dossier du runner puis redémarrer son service.
 #
 # Variables de dépôt facultatives (Settings → Secrets and variables → Actions → Variables) :
 #   - UE_ROOT  : dossier du moteur, ex. D:\Epic\UE_5.6
