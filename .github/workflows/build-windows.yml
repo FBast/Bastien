@@ -51,6 +51,8 @@ jobs:
         # GameplayStateTree fait traiter le projet comme « code » : UAT chercherait alors un
         # BastienEditor.target qui n'existe pas. Le projet n'a aucun module C++, on cuisine
         # donc avec l'éditeur du moteur, passé explicitement.
+        # Le service Zen (cache DDC par défaut) ne démarre pas sous le compte du runner :
+        # on cuisine avec le cache fichier local à la place.
         run: |
           $uat = Join-Path $env:UE_ROOT 'Engine\Build\BatchFiles\RunUAT.bat'
           $editor = Join-Path $env:UE_ROOT 'Engine\Binaries\Win64\UnrealEditor-Cmd.exe'
@@ -61,6 +63,7 @@ jobs:
             -build -cook -stage -pak -iostore -compressed `
             -archive "-archivedirectory=$env:RUNNER_TEMP\Package" `
             "-unrealexe=$editor" `
+            -ddc=InstalledNoZenLocalFallback `
             -nocompileeditor -nop4 -unattended -utf8output
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
