@@ -1,0 +1,26 @@
+name: editor-build
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: [self-hosted, windows, unreal]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false        # on gère LFS à la main, plus bas
+          clean: false      # on garde Intermediate/ entre deux builds : compilation incrémentale
+          fetch-depth: 1
+
+      - name: LFS pull (code et assets nécessaires uniquement)
+        run: git lfs pull
+
+      - name: Build editor
+        run: >
+          & "$env:UE_ROOT\Engine\Build\BatchFiles\RunUAT.bat" BuildGraph
+          -Script="$pwd\Build\BuildGraph.xml" -Target="Editor Binaries"
+          -set:ProjectPath="$pwd\MyGame.uproject" -NoP4 -Unattended
+
+      - name: Upload PCB
+        run: ./Build/upload-binaries.ps1 -Commit $env:GITHUB_SHA
