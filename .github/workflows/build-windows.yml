@@ -1,7 +1,24 @@
-# Package Windows de Bastien (UE 5.6, projet Blueprint) sur le runner auto-hébergé.
-# - push sur main     → build Development publié en pré-release « build-N »
-# - push d'un tag v*   → build Shipping publié en release officielle
-# - lancement manuel   → build en artefact seulement (7 jours)
+# Build Windows d'un projet Unreal Engine sur un runner GitHub auto-hébergé.
+#
+# Déclencheurs :
+#   - push sur main     → build Development publié en pré-release « build-N »
+#   - push d'un tag v*   → build Shipping publié en release officielle
+#   - lancement manuel   → build en artefact seulement (7 jours), configuration au choix
+#
+# Prérequis sur la machine du runner (labels self-hosted, Windows, X64) :
+#   - Unreal Engine installé via l'Epic Launcher, dans la version du .uproject (détectée seule).
+#     Moteur compilé depuis les sources ou installé ailleurs : variable de dépôt UE_ROOT.
+#   - Visual Studio avec « Développement Desktop en C++ » : nécessaire pour un projet C++,
+#     et pour un projet Blueprint qui active des plugins hors défaut.
+#   - Git for Windows (Git LFS inclus).
+#
+# Variables de dépôt facultatives (Settings → Secrets and variables → Actions → Variables) :
+#   - UE_ROOT  : dossier du moteur, ex. D:\Epic\UE_5.6
+#   - UPROJECT : chemin du .uproject s'il n'est pas seul à la racine du dépôt
+#
+# ⚠ Dépôt public : régler Settings → Actions → General → « Require approval for all external
+#   contributors ». Une PR venue d'un fork peut apporter son propre workflow et l'exécuter
+#   sur le runner ; ce fichier n'a volontairement pas de déclencheur pull_request.
 name: Build Windows
 
 on:
@@ -16,9 +33,6 @@ on:
         options: [Development, Shipping]
         default: Development
 
-# Dépôt public + runner auto-hébergé : pas de déclencheur pull_request,
-# sinon une PR venue d'un fork exécute son code sur la machine.
-
 concurrency:
   group: build-windows-${{ github.ref }}
   cancel-in-progress: true
@@ -26,60 +40,108 @@ concurrency:
 jobs:
   package:
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: write     # création des releases et de leurs tags
     env:
-      # Autre chemin moteur : variable de dépôt UE_ROOT (Settings → Secrets and variables → Actions → Variables)
-      UE_ROOT: ${{ vars.UE_ROOT || 'C:\Program Files\Epic Games\UE_5.6' }}
       CONFIG: ${{ startsWith(github.ref, 'refs/tags/v') && 'Shipping' || inputs.config || 'Development' }}
+      UE_ROOT_OVERRIDE: ${{ vars.UE_ROOT }}
+      UPROJECT_OVERRIDE: ${{ vars.UPROJECT }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          clean: false        # garde DerivedDataCache/ et Intermediate/ : cook incrémental
-          lfs: false          # passer à true le jour où le dépôt utilise Git LFS
+          clean: false        # garde DerivedDataCache/ et Intermediate/ : build et cook incrémentaux
+          lfs: true
           fetch-depth: 1
 
-      - name: Vérifier le moteur
+      # Expose PROJECT_FILE, PROJECT_NAME, UE_ROOT et IS_CODE_PROJECT aux étapes suivantes.
+      - name: Détecter le projet et le moteur
         shell: powershell
         run: |
-          $uat = Join-Path $env:UE_ROOT 'Engine\Build\BatchFiles\RunUAT.bat'
-          if (-not (Test-Path $uat)) {
-            Write-Error "RunUAT introuvable : $uat. Régler UE_ROOT (variable de dépôt ou .env du runner)."
+          if ($env:UPROJECT_OVERRIDE) {
+            $uproject = Get-Item (Join-Path $env:GITHUB_WORKSPACE $env:UPROJECT_OVERRIDE)
+          } else {
+            $found = @(Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter *.uproject -File)
+            if ($found.Count -ne 1) {
+              Write-Error "$($found.Count) fichier(s) .uproject à la racine. Indiquer le bon via la variable de dépôt UPROJECT."
+              exit 1
+            }
+            $uproject = $found[0]
+          }
+          $projectDir = $uproject.DirectoryName
+
+          if ($env:UE_ROOT_OVERRIDE) {
+            $ueRoot = $env:UE_ROOT_OVERRIDE
+          } else {
+            # Version Launcher (ex. "5.6") ; un GUID ou une valeur vide désigne un moteur source.
+            $assoc = (Get-Content $uproject.FullName -Raw | ConvertFrom-Json).EngineAssociation
+            if ($assoc -notmatch '^\d+\.\d+$') {
+              Write-Error "EngineAssociation « $assoc » n'est pas une version Launcher. Indiquer le moteur via la variable de dépôt UE_ROOT."
+              exit 1
+            }
+            $ueRoot = "C:\Program Files\Epic Games\UE_$assoc"
+            $manifest = 'C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat'
+            if (Test-Path $manifest) {
+              $install = (Get-Content $manifest -Raw | ConvertFrom-Json).InstallationList |
+                Where-Object { $_.AppName -eq "UE_$assoc" } | Select-Object -First 1
+              if ($install) { $ueRoot = $install.InstallLocation }
+            }
+          }
+          if (-not (Test-Path (Join-Path $ueRoot 'Engine\Build\BatchFiles\RunUAT.bat'))) {
+            Write-Error "Moteur introuvable dans « $ueRoot ». Installer la bonne version ou régler la variable de dépôt UE_ROOT."
             exit 1
           }
 
+          # Projet C++ = des modules à lui (Source/ ou plugin du projet avec Source/).
+          $isCode = (Test-Path (Join-Path $projectDir 'Source')) -or
+            [bool](Get-ChildItem -Path (Join-Path $projectDir 'Plugins') -Directory -Recurse -Filter Source -ErrorAction SilentlyContinue)
+
+          "PROJECT_FILE=$($uproject.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PROJECT_NAME=$($uproject.BaseName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "UE_ROOT=$ueRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "IS_CODE_PROJECT=$isCode" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Projet : $($uproject.FullName) (C++ : $isCode)"
+          Write-Host "Moteur : $ueRoot"
+
       - name: Build, cook, package
         shell: powershell
-        # GameplayStateTree fait traiter le projet comme « code » : UAT chercherait alors un
-        # BastienEditor.target qui n'existe pas. Le projet n'a aucun module C++, on cuisine
-        # donc avec l'éditeur du moteur, passé explicitement.
-        # Le service Zen (cache DDC par défaut) ne démarre pas sous le compte du runner :
-        # on cuisine avec le cache fichier local à la place.
+        # Projet Blueprint : on cuisine avec l'éditeur du moteur. Sans ça, un plugin hors défaut
+        # fait traiter le projet comme « code » et UAT réclame un <Projet>Editor.target jamais compilé.
+        # Projet C++ : UAT compile l'éditeur du projet et cuisine avec.
+        # Le cache DDC Zen ne démarre pas toujours sous le compte de service du runner :
+        # on cuisine avec le cache fichier local.
         run: |
           $uat = Join-Path $env:UE_ROOT 'Engine\Build\BatchFiles\RunUAT.bat'
-          $editor = Join-Path $env:UE_ROOT 'Engine\Binaries\Win64\UnrealEditor-Cmd.exe'
-          & $uat BuildCookRun `
-            "-project=$env:GITHUB_WORKSPACE\Bastien.uproject" `
-            -platform=Win64 `
-            "-clientconfig=$env:CONFIG" `
-            -build -cook -stage -pak -iostore -compressed `
-            -archive "-archivedirectory=$env:RUNNER_TEMP\Package" `
-            "-unrealexe=$editor" `
-            -ddc=InstalledNoZenLocalFallback `
-            -nocompileeditor -nop4 -unattended -utf8output
+          $uatArgs = @(
+            'BuildCookRun',
+            "-project=$env:PROJECT_FILE",
+            '-platform=Win64',
+            "-clientconfig=$env:CONFIG",
+            '-build', '-cook', '-stage', '-pak', '-iostore', '-compressed',
+            '-archive', "-archivedirectory=$env:RUNNER_TEMP\Package",
+            '-ddc=InstalledNoZenLocalFallback',
+            '-nop4', '-unattended', '-utf8output'
+          )
+          if ($env:IS_CODE_PROJECT -ne 'True') {
+            $uatArgs += "-unrealexe=$(Join-Path $env:UE_ROOT 'Engine\Binaries\Win64\UnrealEditor-Cmd.exe')"
+            $uatArgs += '-nocompileeditor'
+          }
+          & $uat @uatArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Zipper le build
+        id: zip
         if: github.event_name == 'push'
         shell: powershell
         run: |
-          $zip = Join-Path $env:RUNNER_TEMP "Bastien-Win64-$env:CONFIG.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "$env:PROJECT_NAME-Win64-$env:CONFIG.zip"
           if (Test-Path $zip) { Remove-Item $zip }
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [IO.Compression.ZipFile]::CreateFromDirectory("$env:RUNNER_TEMP\Package", $zip, 'Optimal', $false)
+          # L'action de release lit un motif glob : l'antislash y est un caractère d'échappement.
+          "path=$($zip -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Pré-release de main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -87,27 +149,27 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           target_commitish: ${{ github.sha }}
-          name: Build ${{ github.run_number }} (${{ env.CONFIG }})
+          name: ${{ env.PROJECT_NAME }} build ${{ github.run_number }} (${{ env.CONFIG }})
           body: Build automatique de ${{ github.sha }}.
           prerelease: true
-          files: ${{ runner.temp }}\Bastien-Win64-${{ env.CONFIG }}.zip
+          files: ${{ steps.zip.outputs.path }}
           fail_on_unmatched_files: true
 
       - name: Release du tag
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: Bastien ${{ github.ref_name }}
+          name: ${{ env.PROJECT_NAME }} ${{ github.ref_name }}
           generate_release_notes: true
           make_latest: true
-          files: ${{ runner.temp }}\Bastien-Win64-${{ env.CONFIG }}.zip
+          files: ${{ steps.zip.outputs.path }}
           fail_on_unmatched_files: true
 
       - name: Publier le build (lancement manuel)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: Bastien-Win64-${{ env.CONFIG }}-${{ github.sha }}
+          name: ${{ env.PROJECT_NAME }}-Win64-${{ env.CONFIG }}-${{ github.sha }}
           path: ${{ runner.temp }}\Package
           retention-days: 7
           if-no-files-found: error
@@ -121,7 +183,10 @@ jobs:
           New-Item -ItemType Directory -Force $dst | Out-Null
           $uatLogs = Join-Path $env:APPDATA 'Unreal Engine\AutomationTool\Logs'
           if (Test-Path $uatLogs) { Copy-Item -Recurse -Force $uatLogs (Join-Path $dst 'UAT') }
-          if (Test-Path 'Saved\Logs') { Copy-Item -Recurse -Force 'Saved\Logs' (Join-Path $dst 'Project') }
+          if ($env:PROJECT_FILE) {
+            $projectLogs = Join-Path (Split-Path $env:PROJECT_FILE) 'Saved\Logs'
+            if (Test-Path $projectLogs) { Copy-Item -Recurse -Force $projectLogs (Join-Path $dst 'Project') }
+          }
 
       - name: Publier les logs
         if: failure()
