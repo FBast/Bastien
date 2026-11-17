@@ -1,10 +1,13 @@
 # Package Windows de Bastien (UE 5.6, projet Blueprint) sur le runner auto-hébergé.
-# À placer dans : .github/workflows/build-windows.yml
+# - push sur main     → build Development publié en pré-release « build-N »
+# - push d'un tag v*   → build Shipping publié en release officielle
+# - lancement manuel   → build en artefact seulement (7 jours)
 name: Build Windows
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       config:
@@ -17,17 +20,19 @@ on:
 # sinon une PR venue d'un fork exécute son code sur la machine.
 
 concurrency:
-  group: build-windows
+  group: build-windows-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   package:
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
+    permissions:
+      contents: write     # création des releases et de leurs tags
     env:
       # Autre chemin moteur : variable de dépôt UE_ROOT (Settings → Secrets and variables → Actions → Variables)
       UE_ROOT: ${{ vars.UE_ROOT || 'C:\Program Files\Epic Games\UE_5.6' }}
-      CONFIG: ${{ inputs.config || 'Development' }}
+      CONFIG: ${{ startsWith(github.ref, 'refs/tags/v') && 'Shipping' || inputs.config || 'Development' }}
 
     steps:
       - name: Checkout
@@ -67,7 +72,39 @@ jobs:
             -nocompileeditor -nop4 -unattended -utf8output
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Publier le build
+      - name: Zipper le build
+        if: github.event_name == 'push'
+        shell: powershell
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "Bastien-Win64-$env:CONFIG.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::CreateFromDirectory("$env:RUNNER_TEMP\Package", $zip, 'Optimal', $false)
+
+      - name: Pré-release de main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: Build ${{ github.run_number }} (${{ env.CONFIG }})
+          body: Build automatique de ${{ github.sha }}.
+          prerelease: true
+          files: ${{ runner.temp }}\Bastien-Win64-${{ env.CONFIG }}.zip
+          fail_on_unmatched_files: true
+
+      - name: Release du tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Bastien ${{ github.ref_name }}
+          generate_release_notes: true
+          make_latest: true
+          files: ${{ runner.temp }}\Bastien-Win64-${{ env.CONFIG }}.zip
+          fail_on_unmatched_files: true
+
+      - name: Publier le build (lancement manuel)
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: Bastien-Win64-${{ env.CONFIG }}-${{ github.sha }}
