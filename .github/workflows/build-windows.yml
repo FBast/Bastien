@@ -59,12 +59,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $ok = $false
-          try {
-            git --version | Out-Null
-            if ($LASTEXITCODE -eq 0) { git lfs version | Out-Null; $ok = ($LASTEXITCODE -eq 0) }
-          } catch { }
-          if ($ok) { Write-Host "Git présent : $((Get-Command git).Source)"; exit 0 }
+          # actions/checkout cherche git.exe ET git-lfs.exe directement dans le PATH.
+          $git = Get-Command git -ErrorAction SilentlyContinue
+          $lfs = Get-Command git-lfs -ErrorAction SilentlyContinue
+          if ($git -and $lfs) { Write-Host "Git présent : $($git.Source) / $($lfs.Source)"; exit 0 }
 
           $root = Join-Path $env:RUNNER_TOOL_CACHE 'PortableGit'
           if (-not (Test-Path (Join-Path $root 'cmd\git.exe'))) {
@@ -79,7 +77,11 @@ jobs:
             Start-Process -FilePath $sfx -ArgumentList '-y', "-o`"$root`"" -Wait -NoNewWindow
             Remove-Item $sfx
           }
+          # Dans la version portable, git-lfs.exe n'est pas dans cmd\ mais dans mingw64\bin\.
+          $lfsDir = (Get-ChildItem -Path $root -Recurse -Filter git-lfs.exe | Select-Object -First 1).DirectoryName
+          if (-not $lfsDir) { Write-Error "git-lfs.exe introuvable dans $root"; exit 1 }
           Join-Path $root 'cmd' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $lfsDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           Write-Host "Git portable : $root"
 
       - name: Checkout
