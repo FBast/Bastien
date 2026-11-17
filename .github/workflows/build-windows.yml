@@ -48,14 +48,19 @@ jobs:
 
       - name: Build, cook, package
         shell: powershell
+        # GameplayStateTree fait traiter le projet comme « code » : UAT chercherait alors un
+        # BastienEditor.target qui n'existe pas. Le projet n'a aucun module C++, on cuisine
+        # donc avec l'éditeur du moteur, passé explicitement.
         run: |
           $uat = Join-Path $env:UE_ROOT 'Engine\Build\BatchFiles\RunUAT.bat'
+          $editor = Join-Path $env:UE_ROOT 'Engine\Binaries\Win64\UnrealEditor-Cmd.exe'
           & $uat BuildCookRun `
             "-project=$env:GITHUB_WORKSPACE\Bastien.uproject" `
             -platform=Win64 `
             "-clientconfig=$env:CONFIG" `
             -build -cook -stage -pak -iostore -compressed `
             -archive "-archivedirectory=$env:RUNNER_TEMP\Package" `
+            "-unrealexe=$editor" `
             -nocompileeditor -nop4 -unattended -utf8output
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
