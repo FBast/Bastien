@@ -1,0 +1,87 @@
+# Package Windows de Bastien (UE 5.6, projet Blueprint) sur le runner auto-hébergé.
+# À placer dans : .github/workflows/build-windows.yml
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      config:
+        description: Configuration du build
+        type: choice
+        options: [Development, Shipping]
+        default: Development
+
+# Dépôt public + runner auto-hébergé : pas de déclencheur pull_request,
+# sinon une PR venue d'un fork exécute son code sur la machine.
+
+concurrency:
+  group: build-windows
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
+    env:
+      # Autre chemin moteur : variable de dépôt UE_ROOT (Settings → Secrets and variables → Actions → Variables)
+      UE_ROOT: ${{ vars.UE_ROOT || 'C:\Program Files\Epic Games\UE_5.6' }}
+      CONFIG: ${{ inputs.config || 'Development' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false        # garde DerivedDataCache/ et Intermediate/ : cook incrémental
+          lfs: false          # passer à true le jour où le dépôt utilise Git LFS
+          fetch-depth: 1
+
+      - name: Vérifier le moteur
+        shell: powershell
+        run: |
+          $uat = Join-Path $env:UE_ROOT 'Engine\Build\BatchFiles\RunUAT.bat'
+          if (-not (Test-Path $uat)) {
+            Write-Error "RunUAT introuvable : $uat. Régler UE_ROOT (variable de dépôt ou .env du runner)."
+            exit 1
+          }
+
+      - name: Build, cook, package
+        shell: powershell
+        run: |
+          $uat = Join-Path $env:UE_ROOT 'Engine\Build\BatchFiles\RunUAT.bat'
+          & $uat BuildCookRun `
+            "-project=$env:GITHUB_WORKSPACE\Bastien.uproject" `
+            -platform=Win64 `
+            "-clientconfig=$env:CONFIG" `
+            -build -cook -stage -pak -iostore -compressed `
+            -archive "-archivedirectory=$env:RUNNER_TEMP\Package" `
+            -nocompileeditor -nop4 -unattended -utf8output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publier le build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bastien-Win64-${{ env.CONFIG }}-${{ github.sha }}
+          path: ${{ runner.temp }}\Package
+          retention-days: 7
+          if-no-files-found: error
+
+      # Avec un moteur du Launcher, UAT écrit ses logs dans %APPDATA% (Program Files est en lecture seule).
+      - name: Rassembler les logs
+        if: failure()
+        shell: powershell
+        run: |
+          $dst = Join-Path $env:RUNNER_TEMP 'Logs'
+          New-Item -ItemType Directory -Force $dst | Out-Null
+          $uatLogs = Join-Path $env:APPDATA 'Unreal Engine\AutomationTool\Logs'
+          if (Test-Path $uatLogs) { Copy-Item -Recurse -Force $uatLogs (Join-Path $dst 'UAT') }
+          if (Test-Path 'Saved\Logs') { Copy-Item -Recurse -Force 'Saved\Logs' (Join-Path $dst 'Project') }
+
+      - name: Publier les logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_id }}
+          path: ${{ runner.temp }}\Logs
+          if-no-files-found: ignore
